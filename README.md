@@ -74,6 +74,11 @@ cd databases_peer_group_11
 
 ```plaintext
 databases_peer_group_11/
+├── api/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── database.py
+│   ├── models.py
 ├── scripts/
 │   ├── schema.sql
 │   ├── load_data.py
@@ -84,6 +89,7 @@ databases_peer_group_11/
     ├── train.csv (contains NAN)
 └── .gitignore
 └── README.md
+└── requirements.txt
 ```
 
 ## Step 4: Connect to Neon (neondb)
