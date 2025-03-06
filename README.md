@@ -72,6 +72,7 @@ cd databases_peer_group_11
 
 ### Project Structure
 
+```plaintext
 databases_peer_group_11/
 ├── scripts/
 │   ├── schema.sql
@@ -83,6 +84,7 @@ databases_peer_group_11/
     ├── train.csv (contains NAN)
 └── .gitignore
 └── README.md
+```
 
 ## Step 4: Connect to Neon (neondb)
 
