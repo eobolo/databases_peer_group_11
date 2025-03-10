@@ -43,3 +43,12 @@ class IncomeLogCreate(BaseModel):
 class IncomeLogUpdate(BaseModel):
     individual_id: Optional[int] = None
     action: Optional[str] = None
+
+# MongoDB-specific models
+class MongoIncomeLogCreate(BaseModel):
+    individual_id: str  # String to represent MongoDB ObjectId
+    action: str
+
+class MongoIncomeLogUpdate(BaseModel):
+    individual_id: Optional[str] = None  # String to represent MongoDB ObjectId
+    action: Optional[str] = None

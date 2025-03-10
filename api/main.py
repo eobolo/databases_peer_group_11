@@ -2,8 +2,10 @@
 from fastapi import FastAPI, HTTPException, Query
 from typing import List, Optional
 import re
-from api.database import get_db_connection, resolve_category, get_unique_values
-from api.models import IndividualCreate, IndividualUpdate, IncomeLogCreate, IncomeLogUpdate
+from datetime import datetime
+from api.database import get_db_connection, resolve_category, get_unique_values, mongo_db, resolve_mongo_category
+from api.models import IndividualCreate, IndividualUpdate, IncomeLogCreate, IncomeLogUpdate, MongoIncomeLogCreate, MongoIncomeLogUpdate
+from bson.objectid import ObjectId
 
 app = FastAPI()
 
@@ -45,7 +47,7 @@ CATEGORICAL_TABLES = {
 }
 
 NUMERIC_BOUNDS = {
-    "age": (0, 120),
+    "age": (13, 120),
     "fnlwgt": (0, 10_000_000),
     "educational_num": (1, 16),
     "capital_gain": (0, 999_999),
@@ -53,7 +55,7 @@ NUMERIC_BOUNDS = {
     "hours_per_week": (1, 168)
 }
 
-# Helper functions
+# Helper functions for PostgreSQL
 def validate_numeric_bounds(column: str, value: int) -> int:
     if column in NUMERIC_BOUNDS:
         min_val, max_val = NUMERIC_BOUNDS[column]
@@ -62,12 +64,12 @@ def validate_numeric_bounds(column: str, value: int) -> int:
     return value
 
 def parse_filter(filter_str: str) -> tuple[str, str, any]:
-    print(f"Parsing filter: {filter_str}")  # Debug log
+    print(f"Parsing filter: {filter_str}")
     match = re.match(r"(\w+)\s*(>=|<=|!=|=|>|<|LIKE)\s*(.+)", filter_str.strip())
     if not match:
         raise HTTPException(400, f"Invalid filter format. Use 'column operator value' (e.g., 'age > 30'). Got: {filter_str}")
     column, operator, value = match.groups()
-    print(f"Parsed: column={column}, operator={operator}, value={value}")  # Debug log
+    print(f"Parsed: column={column}, operator={operator}, value={value}")
     if column not in COLUMN_TYPES:
         raise HTTPException(400, f"Invalid column: {column}")
     col_type = COLUMN_TYPES[column]
@@ -88,7 +90,7 @@ def build_where_clause(filters: List[str], cur, use_alias: bool = True) -> tuple
         return "", []
     conditions = []
     params = []
-    prefix = "i." if use_alias else ""  # Use alias only for SELECT queries
+    prefix = "i." if use_alias else ""
     for filter_str in filters:
         column, operator, value = parse_filter(filter_str)
         if column in CATEGORICAL_TABLES:
@@ -104,7 +106,47 @@ def build_where_clause(filters: List[str], cur, use_alias: bool = True) -> tuple
             params.append(value)
     return "WHERE " + " AND ".join(conditions), params
 
-# CRUD for Individuals
+# MongoDB Helper Function
+def build_mongo_query(filters: List[str]) -> dict:
+    """Builds a MongoDB query from filter strings."""
+    query = {}
+    if not filters:
+        return query
+    for filter_str in filters:
+        column, operator, value = parse_filter(filter_str)
+        if column in CATEGORICAL_TABLES:
+            collection_name = CATEGORICAL_TABLES[column]["table"].lower()
+            field_name = CATEGORICAL_TABLES[column]["name_column"]
+            category_id = resolve_mongo_category(collection_name, field_name, value)
+            query[f"{column}_id"] = category_id
+        else:
+            col_type = COLUMN_TYPES[column]
+            if col_type == "INTEGER":
+                try:
+                    value = int(value)  # Convert string to int if needed (e.g., from URL)
+                except ValueError:
+                    raise HTTPException(400, f"Invalid integer value for {column}: {value}")
+            # For BOOLEAN, value is already True/False from parse_filter, so no further conversion
+            if operator == "=":
+                query[column] = value
+            elif operator == ">":
+                query[column] = {"$gt": value}
+            elif operator == "<":
+                query[column] = {"$lt": value}
+            elif operator == ">=":
+                query[column] = {"$gte": value}
+            elif operator == "<=":
+                query[column] = {"$lte": value}
+            elif operator == "!=":
+                query[column] = {"$ne": value}
+    return query
+
+@app.get("/columns/", response_model=list[str])
+def get_all_columns():
+    """Returns a list of all available column names."""
+    return list(COLUMN_TYPES.keys())
+
+# PostgreSQL CRUD Endpoints (Unchanged)
 @app.get("/individuals/", response_model=list[dict])
 def read_individuals(
     filter: List[str] = Query(None, description="Filters: 'column operator value'"),
@@ -250,7 +292,7 @@ def update_individuals(
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        where_clause, where_params = build_where_clause(filter, cur, use_alias=False)  # No alias for UPDATE
+        where_clause, where_params = build_where_clause(filter, cur, use_alias=False)
         updates = {k: v for k, v in update_data.dict().items() if v is not None}
         if not updates:
             raise HTTPException(400, "No fields to update")
@@ -329,7 +371,7 @@ def delete_individuals(filter: List[str] = Query(..., description="Filters: 'col
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        where_clause, params = build_where_clause(filter, cur, use_alias=False)  # No alias for DELETE
+        where_clause, params = build_where_clause(filter, cur, use_alias=False)
         cur.execute(f"DELETE FROM Individuals {where_clause} RETURNING individual_id", params)
         deleted = cur.fetchall()
         conn.commit()
@@ -359,7 +401,6 @@ def delete_individual_by_id(individual_id: int):
         cur.close()
         conn.close()
 
-# CRUD for Income_Log
 @app.get("/income_logs/", response_model=list[dict])
 def read_income_logs(
     individual_id: Optional[int] = Query(None, description="Filter by individual_id"),
@@ -374,7 +415,7 @@ def read_income_logs(
             conditions.append("individual_id = %s")
             params.append(individual_id)
         if action is not None:
-            conditions.append("action_taken = %s")  # Use the correct column name
+            conditions.append("action_taken = %s")
             params.append(action)
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
         cur.execute(f"SELECT * FROM Income_Log {where_clause}", params)
@@ -479,7 +520,6 @@ def delete_income_log_by_id(log_id: int):
         cur.close()
         conn.close()
 
-# Endpoint for unique categorical values
 @app.get("/unique/{column}/", response_model=list[str])
 def get_unique_categorical_values(column: str):
     conn = get_db_connection()
@@ -492,6 +532,274 @@ def get_unique_categorical_values(column: str):
     finally:
         cur.close()
         conn.close()
+
+# MongoDB CRUD Endpoints
+@app.get("/mongo/individuals/", response_model=list[dict])
+def read_mongo_individuals(
+    filter: List[str] = Query(None, description="Filters: 'column operator value'"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    order_by: Optional[str] = Query(None, description="Sort: 'column direction'")
+):
+    try:
+        query = build_mongo_query(filter) if filter else {}
+        pipeline = [{"$match": query}]
+        
+        # Add lookups for categorical fields
+        for cat_field in CATEGORICAL_TABLES:
+            collection_name = CATEGORICAL_TABLES[cat_field]["table"].lower()
+            id_field = f"{cat_field}_id"
+            name_field = CATEGORICAL_TABLES[cat_field]["name_column"]
+            pipeline.extend([
+                {"$lookup": {
+                    "from": collection_name,
+                    "localField": id_field,
+                    "foreignField": "_id",
+                    "as": f"{cat_field}_doc"
+                }},
+                {"$addFields": {
+                    cat_field: {"$arrayElemAt": [f"${cat_field}_doc.{name_field}", 0]}
+                }}
+            ])
+        
+        # Project fields
+        project = {
+            "_id": 0,
+            "individual_id": "$_id",
+            "age": 1,
+            "fnlwgt": 1,
+            "educational_num": 1,
+            "capital_gain": 1,
+            "capital_loss": 1,
+            "hours_per_week": 1,
+            "income_greater_50k": 1,
+        }
+        for cat_field in CATEGORICAL_TABLES:
+            project[cat_field] = 1
+        pipeline.append({"$project": project})
+        
+        # Add sorting
+        if order_by:
+            match = re.match(r"(\w+)\s*(asc|desc)?", order_by.lower())
+            if not match or match.group(1) not in COLUMN_TYPES:
+                raise HTTPException(400, "Invalid order_by format or column")
+            col, direction = match.groups()
+            sort_order = 1 if direction == "asc" or not direction else -1
+            pipeline.append({"$sort": {col: sort_order}})
+        
+        # Add skip and limit
+        pipeline.extend([{"$skip": offset}, {"$limit": limit}])
+        
+        results = list(mongo_db.individuals.aggregate(pipeline))
+        for doc in results:
+            doc["individual_id"] = str(doc["individual_id"])
+        return results
+    except Exception as e:
+        raise HTTPException(400, f"Query failed: {str(e)}")
+
+@app.get("/mongo/individuals/{individual_id}", response_model=dict)
+def read_mongo_individual_by_id(individual_id: str):
+    try:
+        pipeline = [{"$match": {"_id": ObjectId(individual_id)}}]
+        for cat_field in CATEGORICAL_TABLES:
+            collection_name = CATEGORICAL_TABLES[cat_field]["table"].lower()
+            id_field = f"{cat_field}_id"
+            name_field = CATEGORICAL_TABLES[cat_field]["name_column"]
+            pipeline.extend([
+                {"$lookup": {
+                    "from": collection_name,
+                    "localField": id_field,
+                    "foreignField": "_id",
+                    "as": f"{cat_field}_doc"
+                }},
+                {"$addFields": {
+                    cat_field: {"$arrayElemAt": [f"${cat_field}_doc.{name_field}", 0]}
+                }}
+            ])
+        project = {
+            "_id": 0,
+            "individual_id": "$_id",
+            "age": 1,
+            "fnlwgt": 1,
+            "educational_num": 1,
+            "capital_gain": 1,
+            "capital_loss": 1,
+            "hours_per_week": 1,
+            "income_greater_50k": 1,
+        }
+        for cat_field in CATEGORICAL_TABLES:
+            project[cat_field] = 1
+        pipeline.append({"$project": project})
+        
+        result = list(mongo_db.individuals.aggregate(pipeline))
+        if not result:
+            raise HTTPException(404, f"Individual with ID {individual_id} not found")
+        doc = result[0]
+        doc["individual_id"] = str(doc["individual_id"])
+        return doc
+    except Exception as e:
+        raise HTTPException(400, f"Query failed: {str(e)}")
+
+@app.post("/mongo/individuals/", response_model=dict)
+def create_mongo_individual(individual: IndividualCreate):
+    try:
+        doc = {
+            "age": individual.age,
+            "fnlwgt": individual.fnlwgt,
+            "educational_num": individual.educational_num,
+            "capital_gain": individual.capital_gain or 0,
+            "capital_loss": individual.capital_loss or 0,
+            "hours_per_week": individual.hours_per_week or 40,
+            "income_greater_50k": individual.income_greater_50k or False,
+        }
+        for cat_field in CATEGORICAL_TABLES:
+            value = getattr(individual, cat_field, None)
+            if value:
+                collection_name = CATEGORICAL_TABLES[cat_field]["table"].lower()
+                field_name = CATEGORICAL_TABLES[cat_field]["name_column"]
+                category_id = resolve_mongo_category(collection_name, field_name, value)
+                doc[f"{cat_field}_id"] = category_id
+            else:
+                doc[f"{cat_field}_id"] = None
+        result = mongo_db.individuals.insert_one(doc)
+        return {"individual_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(400, f"Creation failed: {str(e)}")
+
+@app.put("/mongo/individuals/{individual_id}", response_model=dict)
+def update_mongo_individual_by_id(individual_id: str, update_data: IndividualUpdate):
+    try:
+        # Fetch the current document to check income_greater_50k before update
+        current_doc = mongo_db.individuals.find_one({"_id": ObjectId(individual_id)})
+        if not current_doc:
+            raise HTTPException(404, f"Individual with ID {individual_id} not found")
+        
+        # Store the old income_greater_50k value (default to False if not present)
+        old_income = current_doc.get("income_greater_50k", False)
+
+        # Build the updates dictionary
+        updates = {}
+        for field, value in update_data.dict(exclude_unset=True).items():
+            if field in CATEGORICAL_TABLES:
+                if value is not None:
+                    collection_name = CATEGORICAL_TABLES[field]["table"].lower()
+                    field_name = CATEGORICAL_TABLES[field]["name_column"]
+                    category_id = resolve_mongo_category(collection_name, field_name, value)
+                    updates[f"{field}_id"] = category_id
+                else:
+                    updates[f"{field}_id"] = None
+            else:
+                updates[field] = value
+        if not updates:
+            raise HTTPException(400, "No fields to update")
+
+        # Check if income_greater_50k is being updated and differs from the old value
+        new_income = updates.get("income_greater_50k")
+        if new_income is not None and new_income != old_income:
+            # Log the change in income_log collection
+            action = "Income updated to >50k" if new_income else "Income updated to <=50k"
+            log_entry = {
+                "individual_id": ObjectId(individual_id),
+                "action_taken": action,
+                "log_timestamp": datetime.utcnow()
+            }
+            mongo_db.income_log.insert_one(log_entry)
+
+        # Perform the update
+        result = mongo_db.individuals.update_one(
+            {"_id": ObjectId(individual_id)},
+            {"$set": updates}
+        )
+        if result.matched_count == 0:
+            raise HTTPException(404, f"Individual with ID {individual_id} not found")
+        return {"individual_id": individual_id}
+    except Exception as e:
+        raise HTTPException(400, f"Update failed: {str(e)}")
+
+@app.delete("/mongo/individuals/{individual_id}", response_model=dict)
+def delete_mongo_individual_by_id(individual_id: str):
+    try:
+        result = mongo_db.individuals.delete_one({"_id": ObjectId(individual_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(404, f"Individual with ID {individual_id} not found")
+        return {"individual_id": individual_id}
+    except Exception as e:
+        raise HTTPException(400, f"Deletion failed: {str(e)}")
+
+@app.get("/mongo/income_logs/", response_model=list[dict])
+def read_mongo_income_logs(
+    individual_id: Optional[str] = Query(None, description="Filter by individual_id"),
+    action: Optional[str] = Query(None, description="Filter by action")
+):
+    try:
+        query = {}
+        if individual_id:
+            query["individual_id"] = ObjectId(individual_id)
+        if action:
+            query["action_taken"] = action
+        logs = list(mongo_db.income_log.find(query))
+        for log in logs:
+            log["_id"] = str(log["_id"])
+            log["individual_id"] = str(log["individual_id"])
+            log["log_timestamp"] = log["log_timestamp"].isoformat()
+        return logs
+    except Exception as e:
+        raise HTTPException(400, f"Query failed: {str(e)}")
+
+@app.post("/mongo/income_logs/", response_model=dict)
+def create_mongo_income_log(income_log: MongoIncomeLogCreate):
+    try:
+        doc = {
+            "individual_id": ObjectId(income_log.individual_id),
+            "action_taken": income_log.action,
+            "log_timestamp": datetime.utcnow()
+        }
+        result = mongo_db.income_log.insert_one(doc)
+        return {"log_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(400, f"Creation failed: {str(e)}")
+
+@app.put("/mongo/income_logs/{log_id}", response_model=dict)
+def update_mongo_income_log(log_id: str, update_data: MongoIncomeLogUpdate):
+    try:
+        updates = {}
+        if update_data.individual_id is not None:
+            updates["individual_id"] = ObjectId(update_data.individual_id)
+        if update_data.action is not None:
+            updates["action_taken"] = update_data.action
+        if not updates:
+            raise HTTPException(400, "No fields to update")
+        result = mongo_db.income_log.update_one(
+            {"_id": ObjectId(log_id)},
+            {"$set": updates}
+        )
+        if result.matched_count == 0:
+            raise HTTPException(404, f"Income log with ID {log_id} not found")
+        return {"log_id": log_id}
+    except Exception as e:
+        raise HTTPException(400, f"Update failed: {str(e)}")
+
+@app.delete("/mongo/income_logs/{log_id}", response_model=dict)
+def delete_mongo_income_log_by_id(log_id: str):
+    try:
+        result = mongo_db.income_log.delete_one({"_id": ObjectId(log_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(404, f"Income log with ID {log_id} not found")
+        return {"log_id": log_id}
+    except Exception as e:
+        raise HTTPException(400, f"Deletion failed: {str(e)}")
+
+@app.get("/mongo/unique/{column}/", response_model=list[str])
+def get_mongo_unique_categorical_values(column: str):
+    if column not in CATEGORICAL_TABLES:
+        raise HTTPException(400, f"Column '{column}' is not categorical")
+    collection_name = CATEGORICAL_TABLES[column]["table"].lower()
+    field_name = CATEGORICAL_TABLES[column]["name_column"]
+    try:
+        values = mongo_db[collection_name].distinct(field_name)
+        return sorted(values)
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch unique values: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
