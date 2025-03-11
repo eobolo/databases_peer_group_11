@@ -7,8 +7,6 @@ Original file is located at
     https://colab.research.google.com/drive/1VyEs8JRFivbosJ2cqBy8SLfMCihQRVrX
 """
 
-!pip install imbalanced-learn
-
 import os
 import joblib
 import numpy as np
