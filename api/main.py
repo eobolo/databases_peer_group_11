@@ -1,13 +1,43 @@
 # api/main.py
-from fastapi import FastAPI, HTTPException, Query
-from typing import List, Optional
-import re
-from datetime import datetime
 from api.database import get_db_connection, resolve_category, get_unique_values, mongo_db, resolve_mongo_category
-from api.models import IndividualCreate, IndividualUpdate, IncomeLogCreate, IncomeLogUpdate, MongoIncomeLogCreate, MongoIncomeLogUpdate
+from api.models import IndividualCreate, IndividualUpdate, IncomeLogCreate, IncomeLogUpdate, MongoIncomeLogCreate, MongoIncomeLogUpdate, IncomeData
 from bson.objectid import ObjectId
+from datetime import datetime
+from fastapi import FastAPI, HTTPException, Query
+import joblib
+import numpy as np
+import pandas as pd
+from pydantic import BaseModel
+import re
+from tensorflow.keras.models import load_model
+from typing import List, Optional
 
 app = FastAPI()
+
+# Load preprocessors and models
+l_encoders = {}
+# Update this block after app = FastAPI()
+categorical_cols = ['gender', 'workclass', 'education', 'marital-status', 
+                    'occupation', 'relationship', 'race', 'native-country']
+numerical_cols = ['age', 'fnlwgt', 'educational-num', 'capital-gain', 
+                  'capital-loss', 'hours-per-week']
+expected_cols = [
+    'age', 'fnlwgt', 'educational-num', 'capital-gain', 'capital-loss', 'hours-per-week',
+    'workclass', 'education', 'marital-status', 'occupation', 'relationship', 'race', 
+    'gender', 'native-country'
+]
+
+for col in categorical_cols:
+    encoder_file = f'encoders/label_encoder_{col}.pkl'  # Matches your ls output
+    l_encoders[col] = joblib.load(encoder_file)
+scaler = joblib.load('encoders/standard_scaler.pkl')
+
+models = {
+    'Model 1': load_model('saved_models/Model 1.keras'),
+    'Model 2': load_model('saved_models/Model 2.keras'),
+    'Model 3': load_model('saved_models/Model 3.keras')
+}
+available_models = list(models.keys())
 
 # Column metadata for validation
 COLUMN_TYPES = {
@@ -140,6 +170,25 @@ def build_mongo_query(filters: List[str]) -> dict:
             elif operator == "!=":
                 query[column] = {"$ne": value}
     return query
+
+# preprocessing data
+def preprocess_data(data: pd.DataFrame):
+    training_order = [
+        'age', 'fnlwgt', 'educational-num', 'capital-gain', 'capital-loss', 'hours-per-week',
+        'workclass', 'education', 'marital-status', 'occupation', 'relationship', 'race', 
+        'gender', 'native-country'
+    ]
+    for col in training_order:
+        if col not in data.columns:
+            raise ValueError(f"Missing column: {col}")
+    for col in categorical_cols:
+        data[col] = data[col].apply(lambda x: l_encoders[col].transform([x])[0] 
+                                   if x in l_encoders[col].classes_ 
+                                   else l_encoders[col].transform([l_encoders[col].classes_[0]])[0])
+    # Reorder columns to match training order
+    data = data[training_order]
+    data_scaled = scaler.transform(data)
+    return data_scaled
 
 @app.get("/columns/", response_model=list[str])
 def get_all_columns():
@@ -800,6 +849,150 @@ def get_mongo_unique_categorical_values(column: str):
         return sorted(values)
     except Exception as e:
         raise HTTPException(400, f"Failed to fetch unique values: {str(e)}")
+    
+@app.post("/predict")
+async def predict(data: IncomeData, model_name: str = Query("Model 3", enum=available_models)):
+    if model_name not in models:
+        raise HTTPException(status_code=400, detail=f"Invalid model_name. Choose from {available_models}")
+    selected_model = models[model_name]
+    input_dict = data.model_dump()
+    # Rename columns to match training data
+    input_dict_renamed = {
+        'age': input_dict['age'],
+        'fnlwgt': input_dict['fnlwgt'],
+        'educational-num': input_dict['educational_num'],
+        'capital-gain': input_dict['capital_gain'],
+        'capital-loss': input_dict['capital_loss'],
+        'hours-per-week': input_dict['hours_per_week'],
+        'gender': input_dict['gender'],
+        'workclass': input_dict['workclass'],
+        'education': input_dict['education'],
+        'marital-status': input_dict['marital_status'],
+        'occupation': input_dict['occupation'],
+        'relationship': input_dict['relationship'],
+        'race': input_dict['race'],
+        'native-country': input_dict['country']
+    }
+    df = pd.DataFrame([input_dict_renamed])
+    input_data = preprocess_data(df)
+    prediction_prob = selected_model.predict(input_data)[0][0]
+    prediction_class = int(prediction_prob >= 0.5)
+    return {
+        "model_used": model_name,
+        "prediction_probability": float(prediction_prob),
+        "prediction_class": prediction_class,
+        "income_prediction": ">50K" if prediction_class == 1 else "<=50K"
+    }
+
+@app.get("/predict-latest")
+async def predict_latest(model_name: str = Query("Model 3", enum=available_models)):
+    if model_name not in models:
+        raise HTTPException(status_code=400, detail=f"Invalid model_name. Choose from {available_models}")
+    selected_model = models[model_name]
+
+    # Try PostgreSQL first
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Fetch the latest entry from PostgreSQL
+        query = """
+            SELECT 
+                i.individual_id,
+                i.age,
+                i.fnlwgt,
+                i.educational_num,
+                i.capital_gain,
+                i.capital_loss,
+                i.hours_per_week,
+                g.gender AS gender,
+                w.workclass_name AS workclass,
+                e.education_level AS education,
+                m.marital_status AS marital_status,
+                o.occupation_name AS occupation,
+                r.relationship_type AS relationship,
+                ra.race_name AS race,
+                c.country_name AS country
+            FROM Individuals i
+            LEFT JOIN Gender g ON i.gender_id = g.gender_id
+            LEFT JOIN Workclass w ON i.workclass_id = w.workclass_id
+            LEFT JOIN Education e ON i.education_id = e.education_id
+            LEFT JOIN MaritalStatus m ON i.marital_status_id = m.marital_status_id
+            LEFT JOIN Occupation o ON i.occupation_id = o.occupation_id
+            LEFT JOIN Relationship r ON i.relationship_id = r.relationship_id
+            LEFT JOIN Race ra ON i.race_id = ra.race_id
+            LEFT JOIN NativeCountry c ON i.country_id = c.country_id
+            ORDER BY i.individual_id DESC
+            LIMIT 1
+        """
+        cur.execute(query)
+        postgres_entry = cur.fetchone()
+        if postgres_entry:
+            entry = dict(postgres_entry)
+            source = "PostgreSQL"
+        else:
+            # If no entry in PostgreSQL, try MongoDB
+            mongo_entry = mongo_db.individuals.find().sort('_id', -1).limit(1)
+            mongo_entry = next(mongo_entry, None)
+            if mongo_entry:
+                entry = {
+                    'individual_id': str(mongo_entry['_id']),
+                    'age': mongo_entry['age'],
+                    'fnlwgt': mongo_entry['fnlwgt'],
+                    'educational_num': mongo_entry['educational_num'],
+                    'capital_gain': mongo_entry.get('capital_gain', 0),
+                    'capital_loss': mongo_entry.get('capital_loss', 0),
+                    'hours_per_week': mongo_entry.get('hours_per_week', 40),
+                    'gender': mongo_db.gender.find_one({'_id': mongo_entry.get('gender_id')}, {'gender': 1})['gender'] if mongo_entry.get('gender_id') else 'Male',
+                    'workclass': mongo_db.workclass.find_one({'_id': mongo_entry.get('workclass_id')}, {'workclass_name': 1})['workclass_name'] if mongo_entry.get('workclass_id') else 'Private',
+                    'education': mongo_db.education.find_one({'_id': mongo_entry.get('education_id')}, {'education_level': 1})['education_level'] if mongo_entry.get('education_id') else 'HS-grad',
+                    'marital_status': mongo_db.maritalstatus.find_one({'_id': mongo_entry.get('marital_status_id')}, {'marital_status': 1})['marital_status'] if mongo_entry.get('marital_status_id') else 'Never-married',
+                    'occupation': mongo_db.occupation.find_one({'_id': mongo_entry.get('occupation_id')}, {'occupation_name': 1})['occupation_name'] if mongo_entry.get('occupation_id') else 'Other-service',
+                    'relationship': mongo_db.relationship.find_one({'_id': mongo_entry.get('relationship_id')}, {'relationship_type': 1})['relationship_type'] if mongo_entry.get('relationship_id') else 'Not-in-family',
+                    'race': mongo_db.race.find_one({'_id': mongo_entry.get('race_id')}, {'race_name': 1})['race_name'] if mongo_entry.get('race_id') else 'White',
+                    'country': mongo_db.nativecountry.find_one({'_id': mongo_entry.get('country_id')}, {'country_name': 1})['country_name'] if mongo_entry.get('country_id') else 'United-States'
+                }
+                source = "MongoDB"
+            else:
+                raise HTTPException(status_code=404, detail="No entries found in either PostgreSQL or MongoDB individuals collection")
+
+        # Prepare data for prediction
+        input_dict = {
+            'age': entry['age'],
+            'fnlwgt': entry['fnlwgt'],
+            'educational-num': entry['educational_num'],
+            'capital-gain': entry['capital_gain'],
+            'capital-loss': entry['capital_loss'],
+            'hours-per-week': entry['hours_per_week'],
+            'gender': entry['gender'],
+            'workclass': entry['workclass'],
+            'education': entry['education'],
+            'marital-status': entry['marital_status'],
+            'occupation': entry['occupation'],
+            'relationship': entry['relationship'],
+            'race': entry['race'],
+            'native-country': entry['country']
+        }
+        df = pd.DataFrame([input_dict])
+        input_data = preprocess_data(df)
+        prediction_prob = selected_model.predict(input_data)[0][0]
+        prediction_class = int(prediction_prob >= 0.5)
+
+        return {
+            "source": source,
+            "latest_entry": entry,
+            "model_used": model_name,
+            "prediction_probability": float(prediction_prob),
+            "prediction_class": prediction_class,
+            "income_prediction": ">50K" if prediction_class == 1 else "<=50K"
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to predict latest: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
+
 
 if __name__ == "__main__":
     import uvicorn

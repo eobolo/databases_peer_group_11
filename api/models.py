@@ -52,3 +52,19 @@ class MongoIncomeLogCreate(BaseModel):
 class MongoIncomeLogUpdate(BaseModel):
     individual_id: Optional[str] = None  # String to represent MongoDB ObjectId
     action: Optional[str] = None
+
+class IncomeData(BaseModel):
+    age: int
+    fnlwgt: int
+    educational_num: int
+    capital_gain: int
+    capital_loss: int
+    hours_per_week: int
+    gender: str
+    workclass: str
+    education: str
+    marital_status: str
+    occupation: str
+    relationship: str
+    race: str
+    country: str
