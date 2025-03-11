@@ -80,10 +80,29 @@ databases_peer_group_11/
 │   ├── database.py
 │   ├── models.py
 ├── scripts/
+│   ├── __init__.py
+│   ├── predict_from_api.py
 │   ├── schema.sql
 │   ├── load_data.py
 ├── docs/
 │   ├── income_dataset_erd.png
+├── encoders/
+│   ├── label_encoder_education.pkl
+│   ├── label_encoder_gender.pkl
+│   ├── label_encoder_marital-status.pkl
+│   ├── label_encoder_native-country.pkl
+│   ├── label_encoder_occupation.pkl
+│   ├── label_encoder_race.pkl
+│   ├── label_encoder_relationship.pkl
+│   ├── label_encoder_workclass.pkl
+│   ├── standard_scaler.pkl
+├── model/
+│   ├── Income_Prediction_Model.ipynb
+│   ├── Income_Prediction_Model.py
+├── saved_models/
+│   ├── Model 1.keras
+│   ├── Model 2.keras
+│   ├── Model 3.keras
 ├── data/
 │   ├── income_dataset.csv
     ├── train.csv (contains NAN)
