@@ -146,12 +146,10 @@ List Tables:
 SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
 ```
 
+## How to run the sever and Script
+- Sever: python -m api.main
+- Script: python -m scripts.predict_from_api
+
 ## PROJECT API DOCUMENTATIONS
 - [Swagger Documentation](https://databases-and-apis.onrender.com/docs)
-- [Redoc Documentstion](https://databases-and-apis.onrender.com/redoc)
-
-
-### How to run the sever and Script
-#### Sever: python -m api.main
-#### Script: python -m scripts.predict_from_api
-
+- [Redoc Documentation](https://databases-and-apis.onrender.com/redoc)
