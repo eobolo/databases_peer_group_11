@@ -1,109 +1,4 @@
-# No code was selected, so I will provide a Python script to connect to the PostgreSQL database and load the income dataset.
-
-```python
-import psycopg2
-import pandas as pd
-
-# Connection details
-host = 'ep-round-river-a59jaxkv-pooler.us-east-2.aws.neon.tech'
-database = 'neondb'
-username = 'neondb_owner'
-password = 'npg_S8dxteJ7yYmo'
-
-# Establish a connection to the database
-conn = psycopg2.connect(
-    host=host,
-    database=database,
-    user=username,
-    password=password,
-    sslmode='require'
-)
-
-# Load the income dataset
-data = pd.read_csv('data/income_dataset.csv')
-
-# Create a cursor object
-cur = conn.cursor()
-
-# Create the 'Individuals' table if it does not exist
-cur.execute('''
-    CREATE TABLE IF NOT EXISTS Individuals (
-        id SERIAL PRIMARY KEY,
-        age INTEGER,
-        workclass VARCHAR(255),
-        education VARCHAR(255),
-        education_num INTEGER,
-        marital_status VARCHAR(255),
-        occupation VARCHAR(255),
-        relationship VARCHAR(255),
-        race VARCHAR(255),
-        sex VARCHAR(255),
-        capital_gain INTEGER,
-        capital_loss INTEGER,
-        hours_per_week INTEGER,
-        native_country VARCHAR(255),
-        income VARCHAR(255)
-    );
-''')
-
-# Insert data into the 'Individuals' table
-for index, row in data.iterrows():
-    cur.execute('''
-        INSERT INTO Individuals (
-            age,
-            workclass,
-            education,
-            education_num,
-            marital_status,
-            occupation,
-            relationship,
-            race,
-            sex,
-            capital_gain,
-            capital_loss,
-            hours_per_week,
-            native_country,
-            income
-        ) VALUES (
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s
-        );
-    ''', (
-        row['age'],
-        row['workclass'],
-        row['education'],
-        row['education_num'],
-        row['marital_status'],
-        row['occupation'],
-        row['relationship'],
-        row['race'],
-        row['sex'],
-        row['capital_gain'],
-        row['capital_loss'],
-        row['hours_per_week'],
-        row['native_country'],
-        row['income']
-    ))
-
-# Commit the changes
-conn.commit()
-
-# Close the cursor and connection
-cur.close()
-conn.close()
-```# Income Dataset Database Project (Group 11)
+# Income Dataset Database Project (Group 11)
 
 This project implements a PostgreSQL database in Neon (`neondb`) for an ML-relevant income dataset with 43,957 rows. I’ve completed the schema, ERD, and data loading script (not executed yet). This README is your complete guide to setting up, connecting to, and verifying the database. Follow these steps to get started and contribute.
 
@@ -159,20 +54,19 @@ Install these tools to work with the project.
 
 ---
 
-
-## Step 2: Create virtual env
-```terminal
-py -m venv databases
-cd databases
-Scripts\activate.bat
-cd ..
-```
-
 ## Step 2: Clone the Repository
 Get the project files:
 ```bash
 git clone https://github.com/eobolo/databases_peer_group_11.git
 cd databases_peer_group_11
+```
+
+## Step 3: Create virtual env
+```terminal
+py -m venv databases
+cd databases
+Scripts\activate.bat
+cd ..
 ```
 
 ### Project Structure
@@ -251,6 +145,12 @@ List Tables:
 ```sql
 SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
 ```
+
+## PROJECT API DOCUMENTATIONS
+- [Swagger Documentation](https://databases-and-apis.onrender.com/docs)
+- [Redoc Documentstion](https://databases-and-apis.onrender.com/redoc)
+
+
 ### How to run the sever and Script
 #### Sever: python -m api.main
 #### Script: python -m scripts.predict_from_api
